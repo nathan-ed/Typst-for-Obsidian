@@ -9,6 +9,46 @@ interface SnippetItem {
   snippet: Snippet;
 }
 
+const COURSE_LESSON_SNIPPET = [
+  "#seance(",
+  '  "${1:Titre de la seance}",',
+  '  duree: "${2:45 min}",',
+  '  intention: "${3:Intention principale de la seance}",',
+  "  objectifs: [",
+  "    - ${4:Objectif essentiel 1}",
+  "    - ${5:Objectif essentiel 2}",
+  "    - ${6:Objectif essentiel 3}",
+  "  ],",
+  ")[",
+  "  #prof[",
+  "    ${7:Ce que je veux dire, questions a poser, gestes prof.}",
+  "  ]",
+  "",
+  "  #eleves[",
+  "    ${8:Trace, activite ou contenu visible par les eleves.}",
+  "  ]",
+  "",
+  '  #activite(title: "${9:Activite}")[',
+  "    ${10:Consigne ou support d'activite.}",
+  "  ]",
+  "",
+  "  #relance[",
+  "    ${11:Question ou aide si la classe bloque.}",
+  "  ]",
+  "",
+  "  #vigilance[",
+  "    ${12:Erreur attendue, point fragile, piege a eviter.}",
+  "  ]",
+  "",
+  '  #ressource("${13:Titre de la ressource}", "${14:assets/ressource.pdf}")',
+  "",
+  "  #bilan[",
+  "    ${15:Remarques apres la seance, a reprendre l'annee suivante.}",
+  "  ]",
+  "] <${16:id-seance}>",
+  "$0",
+].join("\n");
+
 class InsertSnippetModal extends FuzzySuggestModal<SnippetItem> {
   private items: SnippetItem[];
   private onChoose: (item: SnippetItem) => void;
@@ -160,6 +200,25 @@ export function registerCommands(plugin: TypstForObsidian) {
         view.insertSnippet(item.snippet.body.join("\n"));
       }).open();
 
+      return true;
+    },
+  });
+
+  plugin.addCommand({
+    id: "insert-course-lesson",
+    name: "Insert course lesson template",
+    checkCallback: (checking: boolean) => {
+      const view = plugin.app.workspace.getActiveViewOfType(TypstView);
+      if (!(view instanceof TypstView) || view.getCurrentMode() !== "source") {
+        if (!checking) {
+          new Notice("Must be in a Typst (.typ) file in source mode");
+        }
+        return false;
+      }
+
+      if (!checking) {
+        view.insertSnippet(COURSE_LESSON_SNIPPET);
+      }
       return true;
     },
   });

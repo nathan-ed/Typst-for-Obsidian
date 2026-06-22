@@ -22,17 +22,12 @@ import { SnippetManager } from "./snippetManager";
 // @ts-ignore
 import CompilerWorker from "./compiler.worker.ts";
 import { WorkerRequest } from "./types";
-import {
-  setPluginInstance,
-  resetRegistry,
-  ensureLanguageRegistered,
-} from "./grammar/typstLanguage";
 import { setThemeColors } from "./grammar/typstTheme";
 import "monaco-editor/min/vs/editor/editor.main.css";
 
 export default class TypstForObsidian extends Plugin {
   settings: TypstSettings;
-  compilerWorker: Worker;
+  compilerWorker: Worker | null = null;
   templateProvider: TemplateVariableProvider;
   backlinkParser: BacklinkParser;
   packageManager: PackageManager;
@@ -56,64 +51,32 @@ export default class TypstForObsidian extends Plugin {
     this.packagePath = this.pluginPath + "packages/";
     this.wasmPath = this.pluginPath + "obsidian_typst_bg.wasm";
 
-    setPluginInstance(this);
+    if (!Platform.isMobile) {
+      const { setPluginInstance } = await import("./grammar/typstLanguage");
+      setPluginInstance(this);
+    }
 
     this.packageManager = new PackageManager(this);
-    this.compilerWorker = new CompilerWorker() as Worker;
-    this.fontManager = new FontManager(
-      this.compilerWorker,
-      this.settings.fontFamilies,
-    );
-
-    if (!(await this.app.vault.adapter.exists(this.wasmPath))) {
-      try {
-        await this.fetchWasm();
-      } catch (error) {
-        new Notice("Failed to fetch component: " + error, 0);
-        console.error("Failed to fetch component: " + error);
-      }
-    }
-
-    await this.fetchOnigWasm();
-
-    this.compilerWorker.postMessage({
-      type: "startup",
-      data: {
-        wasm: URL.createObjectURL(
-          new Blob([await this.app.vault.adapter.readBinary(this.wasmPath)], {
-            type: "application/wasm",
-          }),
-        ),
-        // @ts-ignore
-        basePath: this.app.vault.adapter.basePath,
-        packagePath: this.packagePath,
-      },
-    });
-
-    if (Platform.isDesktopApp) {
-      this.compilerWorker.postMessage({
-        type: "canUseSharedArrayBuffer",
-        data: true,
-      });
-      this.fs = require("fs");
-
-      this.compilerWorker.addEventListener("message", (event) => {
-        if (event.data?.type === "ready") {
-          this.isWorkerReady = true;
-          this.fontManager.loadFonts(this.isWorkerReady);
-        }
-      });
-    } else {
-      await this.app.vault.adapter.mkdir(this.packagePath);
-      const packages = await this.getPackageList();
-      this.compilerWorker.postMessage({ type: "packages", data: packages });
-    }
+    this.fontManager = new FontManager(null, this.settings.fontFamilies);
 
     addIcon("typst-file", TypstIcon);
     this.registerExtensions(["typ"], "typst-view");
     this.registerView("typst-view", (leaf) => new TypstView(leaf, this));
     registerCommands(this);
     this.addSettingTab(new TypstSettingTab(this.app, this));
+
+    if (Platform.isMobile) {
+      this.initializeCompiler().catch((error) => {
+        console.error("Failed to initialize Typst compiler:", error);
+      });
+    } else {
+      try {
+        await this.initializeCompiler();
+      } catch (error) {
+        console.error("Failed to initialize Typst compiler:", error);
+        new Notice("Typst compiler unavailable; source editor still works.", 0);
+      }
+    }
 
     this.registerEvent(
       this.app.workspace.on("css-change", async () => {
@@ -181,6 +144,7 @@ export default class TypstForObsidian extends Plugin {
   }
 
   async reloadFonts(): Promise<void> {
+    if (!this.compilerWorker) return;
     this.fontManager = new FontManager(
       this.compilerWorker,
       this.settings.fontFamilies,
@@ -188,8 +152,63 @@ export default class TypstForObsidian extends Plugin {
     await this.fontManager.loadFonts(this.isWorkerReady);
   }
 
+  private async initializeCompiler(): Promise<void> {
+    if (this.compilerWorker) return;
+
+    this.compilerWorker = new CompilerWorker() as Worker;
+    this.fontManager = new FontManager(
+      this.compilerWorker,
+      this.settings.fontFamilies,
+    );
+
+    if (!(await this.app.vault.adapter.exists(this.wasmPath))) {
+      await this.fetchWasm();
+    }
+
+    if (!Platform.isMobile) {
+      await this.fetchOnigWasm();
+    }
+
+    this.compilerWorker.postMessage({
+      type: "startup",
+      data: {
+        wasm: URL.createObjectURL(
+          new Blob([await this.app.vault.adapter.readBinary(this.wasmPath)], {
+            type: "application/wasm",
+          }),
+        ),
+        // @ts-ignore
+        basePath: this.app.vault.adapter.basePath,
+        packagePath: this.packagePath,
+      },
+    });
+
+    this.compilerWorker.addEventListener("message", (event) => {
+      if (event.data?.type === "ready") {
+        this.isWorkerReady = true;
+        this.fontManager.loadFonts(this.isWorkerReady);
+      }
+    });
+
+    if (Platform.isDesktopApp) {
+      this.compilerWorker.postMessage({
+        type: "canUseSharedArrayBuffer",
+        data: true,
+      });
+      this.fs = require("fs");
+    } else {
+      await this.app.vault.adapter.mkdir(this.packagePath);
+      const packages = await this.getPackageList();
+      this.compilerWorker.postMessage({ type: "packages", data: packages });
+    }
+  }
+
   private async resetSyntaxHighlighting() {
+    if (Platform.isMobile) return;
     const isDark = document.body.classList.contains("theme-dark");
+    const { resetRegistry, ensureLanguageRegistered } = await import(
+      "./grammar/typstLanguage"
+    );
     resetRegistry();
     await ensureLanguageRegistered(isDark);
   }
@@ -282,10 +301,7 @@ export default class TypstForObsidian extends Plugin {
     const packages: string[] = [];
     try {
       if (await this.app.vault.adapter.exists(this.packagePath)) {
-        const entries = await this.app.vault.adapter.list(this.packagePath);
-        for (const entry of entries.folders) {
-          packages.push(entry.split("/").slice(-3).join("/"));
-        }
+        await this.collectPackageSpecs(this.packagePath, packages);
       }
     } catch (error) {
       console.error("Failed to get package list:", error);
@@ -293,11 +309,40 @@ export default class TypstForObsidian extends Plugin {
     return packages;
   }
 
+  private async collectPackageSpecs(
+    folder: string,
+    packages: string[],
+  ): Promise<void> {
+    const entries = await this.app.vault.adapter.list(folder);
+
+    for (const file of entries.files) {
+      if (!file.endsWith("/typst.toml")) continue;
+      const relative = file
+        .slice(this.packagePath.length)
+        .replace(/\/typst\.toml$/, "");
+      if (relative.split("/").length === 3) {
+        packages.push(relative);
+      }
+    }
+
+    for (const child of entries.folders) {
+      await this.collectPackageSpecs(child + "/", packages);
+    }
+  }
+
   async compileToPdf(
     source: string,
     path: string = "/main.typ",
     compileType: "internal" | "export" = "internal",
   ): Promise<Uint8Array> {
+    if (!this.compilerWorker) {
+      await this.initializeCompiler();
+    }
+
+    if (!this.compilerWorker) {
+      throw new Error("Typst compiler is not available on this device.");
+    }
+
     let finalSource = source;
 
     if (
@@ -328,7 +373,8 @@ export default class TypstForObsidian extends Plugin {
       },
     };
 
-    this.compilerWorker.postMessage(message);
+    const compilerWorker = this.compilerWorker;
+    compilerWorker.postMessage(message);
 
     while (true) {
       const result = await new Promise<any>((resolve, reject) => {
@@ -348,12 +394,12 @@ export default class TypstForObsidian extends Plugin {
         };
 
         const remove = () => {
-          this.compilerWorker.removeEventListener("message", listener);
-          this.compilerWorker.removeEventListener("error", errorListener);
+          compilerWorker.removeEventListener("message", listener);
+          compilerWorker.removeEventListener("error", errorListener);
         };
 
-        this.compilerWorker.addEventListener("message", listener);
-        this.compilerWorker.addEventListener("error", errorListener);
+        compilerWorker.addEventListener("message", listener);
+        compilerWorker.addEventListener("error", errorListener);
       });
 
       if (
