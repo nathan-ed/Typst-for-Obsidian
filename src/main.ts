@@ -434,86 +434,13 @@ export default class TypstForObsidian extends Plugin {
     }
   }
 
-  // Mobile-only: download any @preview packages the document needs before
-  // compiling, then refresh the worker's package list. Recurses through local
-  // .typ imports so packages referenced by imported templates are caught too.
-  private async ensureMobilePackages(
-    source: string,
-    vaultPath: string,
-  ): Promise<void> {
-    const specs = new Set<string>();
-    await this.scanImports(source, vaultPath, specs, new Set<string>());
-    if (specs.size === 0) return;
-
-    let downloaded = false;
-    for (const spec of specs) {
-      if (await this.app.vault.adapter.exists(this.packagePath + spec + "/")) {
-        continue;
-      }
-      try {
-        await this.packageManager.preparePackage(spec);
-        downloaded = true;
-      } catch (error) {
-        console.error(`Failed to prepare package ${spec}:`, error);
-      }
-    }
-
-    if (downloaded && this.compilerWorker) {
-      const packages = await this.getPackageList();
-      this.compilerWorker.postMessage({ type: "packages", data: packages });
-    }
-  }
-
-  private async scanImports(
-    source: string,
-    vaultPath: string,
-    specs: Set<string>,
-    visited: Set<string>,
-  ): Promise<void> {
-    if (visited.has(vaultPath)) return;
-    visited.add(vaultPath);
-
-    const importRe = /#(?:import|include)\s+"([^"]+)"/g;
-    const localTargets: string[] = [];
-    let match: RegExpExecArray | null;
-    while ((match = importRe.exec(source)) !== null) {
-      const target = match[1];
-      if (target.startsWith("@")) {
-        // "@preview/name:version" -> spec "preview/name/version"
-        const spec = target.slice(1).replace(":", "/");
-        if (spec.split("/").length === 3) specs.add(spec);
-      } else if (target.endsWith(".typ")) {
-        localTargets.push(target);
-      }
-    }
-
-    for (const target of localTargets) {
-      const resolved = this.resolveVaultPath(vaultPath, target);
-      if (!resolved || visited.has(resolved)) continue;
-      try {
-        if (await this.app.vault.adapter.exists(resolved)) {
-          const child = await this.app.vault.adapter.read(resolved);
-          await this.scanImports(child, resolved, specs, visited);
-        }
-      } catch (error) {
-        console.error(`Failed to read import ${resolved}:`, error);
-      }
-    }
-  }
-
-  // Resolve a relative typst import (with ../ segments) against the importing
-  // file's folder, into a vault-root-relative path.
-  private resolveVaultPath(fromPath: string, target: string): string | null {
-    const baseDir = fromPath.includes("/")
-      ? fromPath.slice(0, fromPath.lastIndexOf("/"))
-      : "";
-    const parts = baseDir ? baseDir.split("/") : [];
-    for (const segment of target.split("/")) {
-      if (segment === "" || segment === ".") continue;
-      if (segment === "..") parts.pop();
-      else parts.push(segment);
-    }
-    return parts.join("/");
+  // Extracts a package spec ("preview/name/version") from a Typst
+  // "package not found (searched for @preview/name:version)" error.
+  private parseMissingPackage(errorText: string): string | null {
+    const m = errorText.match(
+      /package not found \(searched for @([^:)\s]+):([^)\s]+)\)/,
+    );
+    return m ? `${m[1]}/${m[2]}` : null;
   }
 
   async compileToPdf(
@@ -562,13 +489,6 @@ export default class TypstForObsidian extends Plugin {
     finalSource = this.templateProvider.replaceVariables(finalSource);
     finalSource = this.backlinkParser.replaceBacklinks(finalSource, path);
 
-    // Mobile can't download packages on demand during compile (the synchronous
-    // file path has no callback to the main thread), so pre-download any
-    // @preview packages referenced by the document and its local imports.
-    if (Platform.isMobile) {
-      await this.ensureMobilePackages(finalSource, path);
-    }
-
     const message = {
       type: "compile",
       data: {
@@ -580,6 +500,12 @@ export default class TypstForObsidian extends Plugin {
 
     const compilerWorker = this.compilerWorker;
     compilerWorker.postMessage(message);
+
+    // Mobile can't fetch packages on demand mid-compile, so when a compile
+    // fails on a missing package we download it and retry. Typst reports one
+    // missing package per attempt, including those pulled in by templates,
+    // other imported files, and package-to-package dependencies.
+    const triedPackages = new Set<string>();
 
     while (true) {
       const result = await new Promise<any>((resolve, reject) => {
@@ -615,6 +541,24 @@ export default class TypstForObsidian extends Plugin {
       ) {
         return result;
       } else if (result && result.error) {
+        const spec = Platform.isMobile
+          ? this.parseMissingPackage(result.error)
+          : null;
+        if (spec && !triedPackages.has(spec)) {
+          triedPackages.add(spec);
+          const dlNotice = new Notice(`Downloading package @${spec}…`, 0);
+          try {
+            await this.packageManager.preparePackage(spec);
+            const packages = await this.getPackageList();
+            compilerWorker.postMessage({ type: "packages", data: packages });
+            compilerWorker.postMessage(message);
+            continue;
+          } catch (downloadError) {
+            console.error(`Failed to prepare package ${spec}:`, downloadError);
+          } finally {
+            dlNotice.hide();
+          }
+        }
         throw new Error(result.error);
       } else if (result && result.buffer && result.path) {
         await this.handleWorkerRequest(result);
