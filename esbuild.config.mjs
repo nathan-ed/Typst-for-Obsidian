@@ -101,9 +101,46 @@ async function buildWorker(workerPath) {
     outfile: bundlePath,
     target: "es2018",
     format: "cjs",
+    // The wasm-bindgen glue (pkg/) references `import.meta.url` only in an
+    // unused fallback branch (the worker always passes the wasm explicitly).
+    // Define it so the es2018 target doesn't emit an empty-import-meta warning.
+    define: {
+      "import.meta.url": '""',
+    },
   });
 
   return fs.promises.readFile(bundlePath, { encoding: "utf-8" });
+}
+
+// Redirect the bare "monaco-editor" import in the main bundle to a tiny shim so
+// monaco (~9 MB) is NOT bundled into main.js. Subpath imports (e.g. the CSS at
+// "monaco-editor/min/...") are left untouched and resolve to the real package.
+let monacoShimPlugin = {
+  name: "monaco-shim",
+  setup(build) {
+    build.onResolve({ filter: /^monaco-editor$/ }, () => ({
+      path: path.resolve("src/monacoExternal.cjs"),
+    }));
+  },
+};
+
+// Build monaco into its own desktop-only file (monaco.js). It is loaded at
+// runtime only on desktop (see TypstForObsidian.loadMonaco), keeping main.js
+// small enough to sync to mobile via Obsidian Sync (5 MB per-file limit).
+async function buildMonaco() {
+  await esbuild.build({
+    entryPoints: ["src/monacoBundle.ts"],
+    bundle: true,
+    minify: true,
+    format: "iife",
+    target: "es2018",
+    logLevel: "info",
+    outfile: "monaco.js",
+    // monaco's CSS is already shipped in styles.css via main.ts's explicit
+    // `editor.main.css` import, so drop CSS here to avoid a duplicate file.
+    loader: { ".css": "empty", ".ttf": "base64" },
+    logOverride: { "css-syntax-error": "silent" },
+  });
 }
 
 const context = await esbuild.context({
@@ -139,14 +176,24 @@ const context = await esbuild.context({
   format: "cjs",
   target: "es2018",
   logLevel: "info",
+  // monaco-editor ships nested CSS (e.g. `a { ... }`) that esbuild flags as
+  // ambiguous but rewrites correctly to `:is(a)`. Silence this vendor-only
+  // warning rather than patching node_modules.
+  logOverride: {
+    "css-syntax-error": "silent",
+  },
   sourcemap: prod ? false : "inline",
   treeShaking: true,
   outfile: "main.js",
   define: {
     PLUGIN_VERSION: JSON.stringify(process.env.npm_package_version),
   },
-  plugins: [inlineWorkerPlugin, wasmPlugin, combineCssPlugin],
+  plugins: [monacoShimPlugin, inlineWorkerPlugin, wasmPlugin, combineCssPlugin],
 });
+
+// monaco.js rarely changes and is slow to build, so build it once up front
+// rather than on every watch rebuild.
+await buildMonaco();
 
 if (prod) {
   await context.rebuild();

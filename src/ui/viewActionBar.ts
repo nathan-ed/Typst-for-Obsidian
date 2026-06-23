@@ -19,11 +19,16 @@ export class ViewActionBar {
   initialize(
     initialMode: "source" | "reading",
     enableLivePreview: boolean = true,
+    isMobile: boolean = false,
   ): void {
     this.currentMode = initialMode;
-    this.createModeToggleButton();
-    if (enableLivePreview) {
-      this.createSplitPreviewButton();
+    // On mobile only one-shot PDF export is supported, so the reading-mode
+    // toggle and live-preview buttons are omitted.
+    if (!isMobile) {
+      this.createModeToggleButton();
+      if (enableLivePreview) {
+        this.createSplitPreviewButton();
+      }
     }
     this.createExportButton();
     this.createErrorsButton();

@@ -24,8 +24,20 @@ function requestData(path: string): string | Uint8Array {
         }
         throw ERROR_NOT_FOUND;
       }
-      path = "http://localhost/_capacitor_file_" + basePath + "/" + path;
-      xhr.open("GET", path, false);
+      // Typst asks for binary files (e.g. WASM plugins like cetz-core) with a
+      // ":binary" suffix. A synchronous XHR can't use responseType
+      // "arraybuffer", so read the raw bytes via the x-user-defined charset
+      // trick and rebuild a Uint8Array.
+      const isBinary = path.endsWith(":binary");
+      const filePath = isBinary ? path.slice(0, -7) : path;
+      const url =
+        "http://localhost/_capacitor_file_" + basePath + "/" + filePath;
+      xhr.open("GET", url, false);
+      if (isBinary) {
+        xhr.overrideMimeType("text/plain; charset=x-user-defined");
+      } else {
+        xhr.overrideMimeType("text/plain; charset=utf-8");
+      }
       try {
         xhr.send();
       } catch (e) {
@@ -34,6 +46,14 @@ function requestData(path: string): string | Uint8Array {
       }
       if (xhr.status == 404) {
         throw ERROR_NOT_FOUND;
+      }
+      if (isBinary) {
+        const text = xhr.responseText;
+        const bytes = new Uint8Array(text.length);
+        for (let i = 0; i < text.length; i++) {
+          bytes[i] = text.charCodeAt(i) & 0xff;
+        }
+        return bytes;
       }
       return xhr.responseText;
     }

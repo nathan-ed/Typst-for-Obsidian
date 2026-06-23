@@ -11,11 +11,18 @@ if (!SOURCE_DIR || !TARGET_DIR) {
   throw new Error("SOURCE_DIR and TARGET_DIR not defined.");
 }
 
-const FILES_TO_COPY = ["pkg", "main.js", "manifest.json", "styles.css"];
+const FILES_TO_COPY = [
+  "pkg",
+  "main.js",
+  "monaco.js",
+  "manifest.json",
+  "styles.css",
+];
 
 const FILES_TO_DELETE = [
   "pkg",
   "main.js",
+  "monaco.js",
   "manifest.json",
   "styles.css",
   "obsidian_typst_bg.wasm",

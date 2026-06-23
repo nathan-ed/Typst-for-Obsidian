@@ -1,9 +1,13 @@
 import { Notice, Platform } from "obsidian";
 
 export class FontManager {
-  constructor(private compilerWorker: Worker, private fontFamilies: string[]) {}
+  constructor(
+    private compilerWorker: Worker | null,
+    private fontFamilies: string[],
+  ) {}
 
   async loadFonts(isWorkerReady: boolean): Promise<void> {
+    if (!this.compilerWorker) return;
     if (!Platform.isDesktopApp || !isWorkerReady) return;
 
     this.compilerWorker.postMessage({ type: "reset_fonts" });
