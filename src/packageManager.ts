@@ -96,18 +96,30 @@ export class PackageManager {
     // mobile webview and prevents the whole plugin from loading.
     // @ts-ignore
     const untar = (await import("js-untar")).default;
-    const untarrer = untar(decompressed.buffer as ArrayBuffer);
-    await (untarrer as any).progress(async (file: any) => {
-      if (file.type == "5" && file.name != ".") {
-        await this.plugin.app.vault.adapter.mkdir(folder + file.name);
+    const files: any[] = await untar(decompressed.buffer as ArrayBuffer);
+    for (const file of files) {
+      // type "0"/"" are regular files, "5" is a directory.
+      if (file.type === "5") continue;
+      if (file.type !== "0" && file.type !== "") continue;
+      const fullPath = folder + file.name;
+      // Tarballs don't always list parent directories before their files (and
+      // adapter.writeBinary won't create them), so ensure the full directory
+      // chain exists. This is what makes nested binary assets like
+      // cetz-core/cetz_core.wasm land on disk on mobile.
+      await this.ensureDir(fullPath.slice(0, fullPath.lastIndexOf("/")));
+      await this.plugin.app.vault.adapter.writeBinary(fullPath, file.buffer);
+    }
+  }
+
+  private async ensureDir(dir: string): Promise<void> {
+    const parts = dir.split("/").filter((p) => p.length > 0);
+    let current = "";
+    for (const part of parts) {
+      current += (current ? "/" : "") + part;
+      if (!(await this.plugin.app.vault.adapter.exists(current))) {
+        await this.plugin.app.vault.adapter.mkdir(current);
       }
-      if (file.type === "0") {
-        await this.plugin.app.vault.adapter.writeBinary(
-          folder + file.name,
-          file.buffer,
-        );
-      }
-    });
+    }
   }
 
   async getFileString(path: string): Promise<string> {
