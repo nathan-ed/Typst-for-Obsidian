@@ -244,7 +244,8 @@ export class TypstView extends TextFileView {
 
       return pdfPath;
     } catch (error) {
-      new Notice("Failed to export PDF. See console for details.");
+      const msg = error instanceof Error ? error.message : String(error);
+      new Notice("Failed to export PDF: " + msg, 0);
       console.error("Failed to export PDF:", error);
       return null;
     }

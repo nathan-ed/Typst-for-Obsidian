@@ -39,6 +39,9 @@ export default class TypstForObsidian extends Plugin {
   pluginPath: string;
   packagePath: string;
   private isWorkerReady: boolean = false;
+  private workerReady: Promise<void> | null = null;
+  private workerReadyResolve: (() => void) | null = null;
+  private workerReadyReject: ((err: Error) => void) | null = null;
 
   async onload() {
     try {
@@ -193,6 +196,15 @@ export default class TypstForObsidian extends Plugin {
       this.settings.fontFamilies,
     );
 
+    // Resolves once the worker has finished instantiating the wasm and posted
+    // "ready". compileToPdf awaits this so it never sends a compile before the
+    // compiler exists (the lazy mobile init made that race surface as
+    // "Compiler not initialized").
+    this.workerReady = new Promise<void>((resolve, reject) => {
+      this.workerReadyResolve = resolve;
+      this.workerReadyReject = reject;
+    });
+
     if (!(await this.app.vault.adapter.exists(this.wasmPath))) {
       await this.fetchWasm();
     }
@@ -201,24 +213,32 @@ export default class TypstForObsidian extends Plugin {
       await this.fetchOnigWasm();
     }
 
-    this.compilerWorker.postMessage({
-      type: "startup",
-      data: {
-        wasm: URL.createObjectURL(
-          new Blob([await this.app.vault.adapter.readBinary(this.wasmPath)], {
-            type: "application/wasm",
-          }),
-        ),
-        // @ts-ignore
-        basePath: this.app.vault.adapter.basePath,
-        packagePath: this.packagePath,
+    // Transfer the wasm bytes to the worker (zero-copy) instead of building a
+    // Blob + object URL + fetch. This minimizes peak memory, which matters on
+    // mobile where the 40 MB wasm can otherwise OOM-crash the app.
+    const wasmBytes = await this.app.vault.adapter.readBinary(this.wasmPath);
+    this.compilerWorker.postMessage(
+      {
+        type: "startup",
+        data: {
+          wasm: wasmBytes,
+          // @ts-ignore
+          basePath: this.app.vault.adapter.basePath,
+          packagePath: this.packagePath,
+        },
       },
-    });
+      [wasmBytes],
+    );
 
     this.compilerWorker.addEventListener("message", (event) => {
       if (event.data?.type === "ready") {
         this.isWorkerReady = true;
         this.fontManager.loadFonts(this.isWorkerReady);
+        this.workerReadyResolve?.();
+      } else if (event.data?.type === "error" && !this.isWorkerReady) {
+        this.workerReadyReject?.(
+          new Error(event.data.error || "Typst compiler failed to initialize"),
+        );
       }
     });
 
@@ -307,13 +327,46 @@ export default class TypstForObsidian extends Plugin {
 
       // Mobile: the 40 MB wasm can't sync (Obsidian Sync's 5 MB limit), so
       // download it once from the hosted URL and cache it in the vault.
-      const notice = new Notice(
-        "Downloading Typst compiler (~40 MB), one time…",
-        0,
-      );
+      // Download in Range chunks: a single requestUrl of the whole file
+      // balloons memory on mobile (binary comes back base64-encoded) and
+      // OOM-crashes the app, so keep each request small.
+      const notice = new Notice("Downloading Typst compiler (~40 MB)…", 0);
       try {
-        const response = await requestUrl({ url: TYPST_WASM_URL });
-        await adapter.writeBinary(this.wasmPath, response.arrayBuffer);
+        // Probe total size via a tiny ranged request (server sends
+        // "content-range: bytes 0-0/<total>").
+        const probe = await requestUrl({
+          url: TYPST_WASM_URL,
+          headers: { Range: "bytes=0-0" },
+        });
+        const contentRange =
+          probe.headers["content-range"] ?? probe.headers["Content-Range"];
+        const total = contentRange
+          ? parseInt(contentRange.split("/")[1], 10)
+          : 0;
+
+        if (!total) {
+          // Server didn't honor Range; fall back to a single download.
+          const response = await requestUrl({ url: TYPST_WASM_URL });
+          await adapter.writeBinary(this.wasmPath, response.arrayBuffer);
+          return;
+        }
+
+        const CHUNK = 4 * 1024 * 1024;
+        const combined = new Uint8Array(total);
+        let offset = 0;
+        while (offset < total) {
+          const end = Math.min(offset + CHUNK, total) - 1;
+          const chunk = await requestUrl({
+            url: TYPST_WASM_URL,
+            headers: { Range: `bytes=${offset}-${end}` },
+          });
+          combined.set(new Uint8Array(chunk.arrayBuffer), offset);
+          offset = end + 1;
+          notice.setMessage(
+            `Downloading Typst compiler… ${Math.round((offset / total) * 100)}%`,
+          );
+        }
+        await adapter.writeBinary(this.wasmPath, combined.buffer);
       } finally {
         notice.hide();
       }
@@ -381,6 +434,88 @@ export default class TypstForObsidian extends Plugin {
     }
   }
 
+  // Mobile-only: download any @preview packages the document needs before
+  // compiling, then refresh the worker's package list. Recurses through local
+  // .typ imports so packages referenced by imported templates are caught too.
+  private async ensureMobilePackages(
+    source: string,
+    vaultPath: string,
+  ): Promise<void> {
+    const specs = new Set<string>();
+    await this.scanImports(source, vaultPath, specs, new Set<string>());
+    if (specs.size === 0) return;
+
+    let downloaded = false;
+    for (const spec of specs) {
+      if (await this.app.vault.adapter.exists(this.packagePath + spec + "/")) {
+        continue;
+      }
+      try {
+        await this.packageManager.preparePackage(spec);
+        downloaded = true;
+      } catch (error) {
+        console.error(`Failed to prepare package ${spec}:`, error);
+      }
+    }
+
+    if (downloaded && this.compilerWorker) {
+      const packages = await this.getPackageList();
+      this.compilerWorker.postMessage({ type: "packages", data: packages });
+    }
+  }
+
+  private async scanImports(
+    source: string,
+    vaultPath: string,
+    specs: Set<string>,
+    visited: Set<string>,
+  ): Promise<void> {
+    if (visited.has(vaultPath)) return;
+    visited.add(vaultPath);
+
+    const importRe = /#(?:import|include)\s+"([^"]+)"/g;
+    const localTargets: string[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = importRe.exec(source)) !== null) {
+      const target = match[1];
+      if (target.startsWith("@")) {
+        // "@preview/name:version" -> spec "preview/name/version"
+        const spec = target.slice(1).replace(":", "/");
+        if (spec.split("/").length === 3) specs.add(spec);
+      } else if (target.endsWith(".typ")) {
+        localTargets.push(target);
+      }
+    }
+
+    for (const target of localTargets) {
+      const resolved = this.resolveVaultPath(vaultPath, target);
+      if (!resolved || visited.has(resolved)) continue;
+      try {
+        if (await this.app.vault.adapter.exists(resolved)) {
+          const child = await this.app.vault.adapter.read(resolved);
+          await this.scanImports(child, resolved, specs, visited);
+        }
+      } catch (error) {
+        console.error(`Failed to read import ${resolved}:`, error);
+      }
+    }
+  }
+
+  // Resolve a relative typst import (with ../ segments) against the importing
+  // file's folder, into a vault-root-relative path.
+  private resolveVaultPath(fromPath: string, target: string): string | null {
+    const baseDir = fromPath.includes("/")
+      ? fromPath.slice(0, fromPath.lastIndexOf("/"))
+      : "";
+    const parts = baseDir ? baseDir.split("/") : [];
+    for (const segment of target.split("/")) {
+      if (segment === "" || segment === ".") continue;
+      if (segment === "..") parts.pop();
+      else parts.push(segment);
+    }
+    return parts.join("/");
+  }
+
   async compileToPdf(
     source: string,
     path: string = "/main.typ",
@@ -399,6 +534,11 @@ export default class TypstForObsidian extends Plugin {
 
     if (!this.compilerWorker) {
       throw new Error("Typst compiler is not available on this device.");
+    }
+
+    // Wait for the worker to finish instantiating the wasm before compiling.
+    if (this.workerReady) {
+      await this.workerReady;
     }
 
     let finalSource = source;
@@ -421,6 +561,13 @@ export default class TypstForObsidian extends Plugin {
 
     finalSource = this.templateProvider.replaceVariables(finalSource);
     finalSource = this.backlinkParser.replaceBacklinks(finalSource, path);
+
+    // Mobile can't download packages on demand during compile (the synchronous
+    // file path has no callback to the main thread), so pre-download any
+    // @preview packages referenced by the document and its local imports.
+    if (Platform.isMobile) {
+      await this.ensureMobilePackages(finalSource, path);
+    }
 
     const message = {
       type: "compile",
