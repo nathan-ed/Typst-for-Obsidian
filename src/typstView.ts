@@ -38,7 +38,8 @@ export class TypstView extends TextFileView {
     super(leaf);
     this.plugin = plugin;
 
-    if (TypstView._suppressAutoSplit) {
+    if (Platform.isMobile || TypstView._suppressAutoSplit) {
+      // Mobile has no Typst compiler/preview: editing only, always source mode.
       this.currentMode = "source";
     } else {
       const defaultMode = plugin.settings.defaultMode;
@@ -114,7 +115,8 @@ export class TypstView extends TextFileView {
       );
       this.actionBar.initialize(
         this.currentMode,
-        this.plugin.settings.enableLivePreview,
+        !Platform.isMobile && this.plugin.settings.enableLivePreview,
+        Platform.isMobile,
       );
       this.actionBar.updateErrorCount(this.currentErrors.length);
     }
@@ -529,6 +531,7 @@ export class TypstView extends TextFileView {
     this.fileContent = data;
 
     if (
+      !Platform.isMobile &&
       this.plugin.settings.defaultMode === "last" &&
       this.file &&
       !this.pairedView

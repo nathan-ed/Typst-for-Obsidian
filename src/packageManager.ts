@@ -3,8 +3,6 @@ import type TypstPlugin from "./main";
 import { decompressSync } from "fflate";
 import { TYPST_PACKAGES_URL } from "./util/constants";
 import { DownloadPackageModal } from "./ui/downloadPackageModal";
-// @ts-ignore
-import untar from "js-untar";
 
 export class PackageManager {
   private fs: any;
@@ -93,6 +91,11 @@ export class PackageManager {
     }
     await this.plugin.app.vault.adapter.mkdir(folder);
     const decompressed = decompressSync(new Uint8Array(response.arrayBuffer));
+    // Loaded lazily: importing js-untar eagerly executes
+    // `URL.createObjectURL(new Blob(...))` at module scope, which throws on the
+    // mobile webview and prevents the whole plugin from loading.
+    // @ts-ignore
+    const untar = (await import("js-untar")).default;
     const untarrer = untar(decompressed.buffer as ArrayBuffer);
     await (untarrer as any).progress(async (file: any) => {
       if (file.type == "5" && file.name != ".") {

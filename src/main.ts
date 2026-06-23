@@ -11,7 +11,7 @@ import {
 import { TypstView } from "./typstView";
 import { registerCommands } from "./settings/commands";
 import { TypstIcon, pluginId } from "./util/typstUtils";
-import { ONIGURUMA_WASM_URL } from "./util/constants";
+import { ONIGURUMA_WASM_URL, TYPST_WASM_URL } from "./util/constants";
 import { TypstSettingTab } from "./settings/settingsTab";
 import { TypstSettings, DEFAULT_SETTINGS } from "./settings/settings";
 import { TemplateVariableProvider } from "./templateVariableProvider";
@@ -41,41 +41,57 @@ export default class TypstForObsidian extends Plugin {
   private isWorkerReady: boolean = false;
 
   async onload() {
-    this.textEncoder = new TextEncoder();
-    this.templateProvider = new TemplateVariableProvider();
-    this.backlinkParser = new BacklinkParser(this.app);
-    this.snippetManager = new SnippetManager();
-    await this.loadSettings();
+    try {
+      this.textEncoder = new TextEncoder();
+      this.templateProvider = new TemplateVariableProvider();
+      this.backlinkParser = new BacklinkParser(this.app);
+      this.snippetManager = new SnippetManager();
+      await this.loadSettings();
 
-    this.pluginPath = this.app.vault.configDir + `/plugins/${pluginId}/`;
-    this.packagePath = this.pluginPath + "packages/";
-    this.wasmPath = this.pluginPath + "obsidian_typst_bg.wasm";
+      this.pluginPath = this.app.vault.configDir + `/plugins/${pluginId}/`;
+      this.packagePath = this.pluginPath + "packages/";
+      this.wasmPath = this.pluginPath + "obsidian_typst_bg.wasm";
 
-    if (!Platform.isMobile) {
-      const { setPluginInstance } = await import("./grammar/typstLanguage");
-      setPluginInstance(this);
-    }
+      this.packageManager = new PackageManager(this);
+      this.fontManager = new FontManager(null, this.settings.fontFamilies);
 
-    this.packageManager = new PackageManager(this);
-    this.fontManager = new FontManager(null, this.settings.fontFamilies);
+      // Register the editor view FIRST so that opening and editing .typ files
+      // always works, even if compiler / syntax-highlighting setup fails later
+      // (this is the supported experience on mobile, where we never compile).
+      addIcon("typst-file", TypstIcon);
+      this.registerView("typst-view", (leaf) => new TypstView(leaf, this));
+      this.registerExtensions(["typ"], "typst-view");
+      registerCommands(this);
+      this.addSettingTab(new TypstSettingTab(this.app, this));
 
-    addIcon("typst-file", TypstIcon);
-    this.registerExtensions(["typ"], "typst-view");
-    this.registerView("typst-view", (leaf) => new TypstView(leaf, this));
-    registerCommands(this);
-    this.addSettingTab(new TypstSettingTab(this.app, this));
-
-    if (Platform.isMobile) {
-      this.initializeCompiler().catch((error) => {
-        console.error("Failed to initialize Typst compiler:", error);
-      });
-    } else {
-      try {
-        await this.initializeCompiler();
-      } catch (error) {
-        console.error("Failed to initialize Typst compiler:", error);
-        new Notice("Typst compiler unavailable; source editor still works.", 0);
+      // Monaco (the source editor + syntax highlighting) is desktop-only and
+      // ships as a separate file to keep main.js under Obsidian Sync's 5 MB
+      // per-file limit. Load it before any module that imports monaco.
+      if (!Platform.isMobile) {
+        await this.loadMonaco();
+        const { setPluginInstance } = await import("./grammar/typstLanguage");
+        setPluginInstance(this);
       }
+
+      // Compiling/previewing requires the Typst WASM worker, which is not
+      // supported on mobile. Initialize it in the background and never let a
+      // failure here break plugin load or editing.
+      if (!Platform.isMobile) {
+        this.initializeCompiler().catch((error) => {
+          console.error("Failed to initialize Typst compiler:", error);
+          new Notice(
+            "Typst compiler unavailable; source editor still works.",
+            0,
+          );
+        });
+      }
+    } catch (error) {
+      console.error("Typst for Obsidian failed to load:", error);
+      new Notice(
+        "Typst for Obsidian failed to load: " +
+          ((error as Error)?.message ?? String(error)),
+        0,
+      );
     }
 
     this.registerEvent(
@@ -141,6 +157,22 @@ export default class TypstForObsidian extends Plugin {
         }
       }),
     );
+  }
+
+  // Loads the separate, desktop-only monaco.js and exposes the monaco namespace
+  // on globalThis so the main bundle's monaco-editor shim can resolve it. Must
+  // run before importing ./typstEditor or ./grammar/typstLanguage.
+  private async loadMonaco(): Promise<void> {
+    if ((globalThis as Record<string, unknown>).__TYPST_MONACO__) return;
+    const monacoPath = this.pluginPath + "monaco.js";
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(monacoPath))) {
+      throw new Error(`monaco.js not found at ${monacoPath}`);
+    }
+    const code = await adapter.read(monacoPath);
+    // Indirect eval executes in global scope so monaco.js can assign
+    // globalThis.__TYPST_MONACO__.
+    (0, eval)(code);
   }
 
   async reloadFonts(): Promise<void> {
@@ -262,10 +294,29 @@ export default class TypstForObsidian extends Plugin {
 
   private async fetchWasm() {
     try {
-      const wasmSourcePath = this.pluginPath + "pkg/obsidian_typst_bg.wasm";
-      const wasmData = await this.app.vault.adapter.readBinary(wasmSourcePath);
-      await this.app.vault.adapter.mkdir(this.pluginPath);
-      await this.app.vault.adapter.writeBinary(this.wasmPath, wasmData);
+      const adapter = this.app.vault.adapter;
+      await adapter.mkdir(this.pluginPath);
+
+      // Desktop ships the full wasm in the plugin folder; reuse it if present.
+      const localSource = this.pluginPath + "pkg/obsidian_typst_bg.wasm";
+      if (await adapter.exists(localSource)) {
+        const wasmData = await adapter.readBinary(localSource);
+        await adapter.writeBinary(this.wasmPath, wasmData);
+        return;
+      }
+
+      // Mobile: the 40 MB wasm can't sync (Obsidian Sync's 5 MB limit), so
+      // download it once from the hosted URL and cache it in the vault.
+      const notice = new Notice(
+        "Downloading Typst compiler (~40 MB), one time…",
+        0,
+      );
+      try {
+        const response = await requestUrl({ url: TYPST_WASM_URL });
+        await adapter.writeBinary(this.wasmPath, response.arrayBuffer);
+      } finally {
+        notice.hide();
+      }
     } catch (error) {
       console.error("Failed to fetch WASM:", error);
       throw error;
@@ -335,6 +386,13 @@ export default class TypstForObsidian extends Plugin {
     path: string = "/main.typ",
     compileType: "internal" | "export" = "internal",
   ): Promise<Uint8Array> {
+    // On mobile, only one-shot PDF export is supported — no live preview or
+    // compile-on-save. The compiler worker is initialized lazily here, on the
+    // first export, so loading and editing stay fast.
+    if (Platform.isMobile && compileType !== "export") {
+      throw new Error("On mobile, only PDF export is supported.");
+    }
+
     if (!this.compilerWorker) {
       await this.initializeCompiler();
     }

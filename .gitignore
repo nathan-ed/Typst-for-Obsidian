@@ -2,6 +2,7 @@ node_modules
 tests/
 
 main.js
+monaco.js
 main.css
 styles.css
 *.js.map
