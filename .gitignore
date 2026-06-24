@@ -2,6 +2,7 @@ node_modules
 tests/
 
 main.js
+monaco.js
 main.css
 styles.css
 *.js.map
@@ -15,3 +16,7 @@ compiler/target/
 styles.css
 
 .env
+
+# Personal teaching content / local deploy script — not part of the plugin.
+Cours/
+deploy-local.sh

@@ -1,5 +1,6 @@
 import { Scope, Platform } from "obsidian";
-import { TypstEditor } from "./typstEditor";
+import type { TypstEditor } from "./typstEditor";
+import type { PlainTypstEditor } from "./plainTypstEditor";
 
 export interface HotkeyDefinition {
   id: string;
@@ -463,7 +464,7 @@ export function findConflicts(
 
 interface EditorHotkeyCallbacks {
   getCurrentMode: () => string;
-  getEditor: () => TypstEditor | null;
+  getEditor: () => TypstEditor | PlainTypstEditor | null;
   toggleBold: () => void;
   toggleItalic: () => void;
   toggleUnderline: () => void;

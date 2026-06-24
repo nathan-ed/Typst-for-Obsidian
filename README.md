@@ -6,6 +6,13 @@ Typst for Obsidian is a [Typst](https://typst.app) editor integrated directly in
   <img src="assets/tfo-ss.png" width="700">
 </p>
 
+> **Fork note — mobile support.** This fork adds Obsidian **mobile** support:
+> edit `.typ` files on your phone and **export to PDF** there, including
+> documents that use `@preview` packages (even ones with native WASM plugins
+> like `cetz`). Mobile compilation is export-only (no live preview). See
+> **[MOBILE.md](./MOBILE.md)** for how it works and the one-time setup (hosting
+> the compiler WASM as a GitHub Release).
+
 ## Features
 
 - Open `.typ` files in Obsidian

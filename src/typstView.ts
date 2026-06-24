@@ -5,8 +5,10 @@ import {
   normalizePath,
   TFile,
   Scope,
+  Platform,
 } from "obsidian";
-import { TypstEditor } from "./typstEditor";
+import type { TypstEditor } from "./typstEditor";
+import { PlainTypstEditor } from "./plainTypstEditor";
 import TypstForObsidian from "./main";
 import { PdfRenderer } from "./pdfRenderer";
 import { ViewActionBar } from "./ui/viewActionBar";
@@ -19,7 +21,7 @@ export class TypstView extends TextFileView {
   private static _suppressAutoSplit = false;
 
   private currentMode: "source" | "reading" = "source";
-  private typstEditor: TypstEditor | null = null;
+  private typstEditor: TypstEditor | PlainTypstEditor | null = null;
   private fileContent: string = "";
   private plugin: TypstForObsidian;
   private pdfRenderer: PdfRenderer;
@@ -36,7 +38,8 @@ export class TypstView extends TextFileView {
     super(leaf);
     this.plugin = plugin;
 
-    if (TypstView._suppressAutoSplit) {
+    if (Platform.isMobile || TypstView._suppressAutoSplit) {
+      // Mobile has no Typst compiler/preview: editing only, always source mode.
       this.currentMode = "source";
     } else {
       const defaultMode = plugin.settings.defaultMode;
@@ -112,7 +115,8 @@ export class TypstView extends TextFileView {
       );
       this.actionBar.initialize(
         this.currentMode,
-        this.plugin.settings.enableLivePreview,
+        !Platform.isMobile && this.plugin.settings.enableLivePreview,
+        Platform.isMobile,
       );
       this.actionBar.updateErrorCount(this.currentErrors.length);
     }
@@ -240,7 +244,8 @@ export class TypstView extends TextFileView {
 
       return pdfPath;
     } catch (error) {
-      new Notice("Failed to export PDF. See console for details.");
+      const msg = error instanceof Error ? error.message : String(error);
+      new Notice("Failed to export PDF: " + msg, 0);
       console.error("Failed to export PDF:", error);
       return null;
     }
@@ -348,6 +353,9 @@ export class TypstView extends TextFileView {
     }
     if (this.currentMode === "source" && this.pairedView) {
       this.clearErrors();
+      if (this.pairedView.getCurrentMode() === "reading") {
+        await this.pairedView.showReadingMode(result.pdfData);
+      }
     }
   }
 
@@ -388,7 +396,7 @@ export class TypstView extends TextFileView {
     if (this.currentMode === "source") {
       await this.switchToReadingMode();
     } else {
-      this.switchToSourceMode();
+      await this.switchToSourceMode();
     }
   }
 
@@ -444,11 +452,11 @@ export class TypstView extends TextFileView {
     await this.showReadingMode(pdfData);
   }
 
-  private switchToSourceMode(): void {
+  private async switchToSourceMode(): Promise<void> {
     this.saveEditorState();
 
     this.setMode("source");
-    this.showSourceMode();
+    await this.showSourceMode();
     this.restoreEditorState();
   }
 
@@ -524,6 +532,7 @@ export class TypstView extends TextFileView {
     this.fileContent = data;
 
     if (
+      !Platform.isMobile &&
       this.plugin.settings.defaultMode === "last" &&
       this.file &&
       !this.pairedView
@@ -535,7 +544,7 @@ export class TypstView extends TextFileView {
     }
 
     if (this.currentMode === "source") {
-      this.showSourceMode();
+      await this.showSourceMode();
     } else {
       await this.loadReadingMode(data);
     }
@@ -564,7 +573,7 @@ export class TypstView extends TextFileView {
     if (!pdfData) {
       if (!this.livePreviewActive) {
         this.setMode("source");
-        this.showSourceMode();
+        await this.showSourceMode();
       }
     } else {
       await this.showReadingMode(pdfData);
@@ -597,15 +606,20 @@ export class TypstView extends TextFileView {
     this.typstEditor?.insertSnippet(snippetText);
   }
 
-  public showSourceMode(): void {
+  public async showSourceMode(): Promise<void> {
     const contentEl = this.getContentElement();
     if (!contentEl) return;
 
     contentEl.empty();
     this.cleanupEditor();
 
-    this.typstEditor = new TypstEditor(
-      contentEl,
+    const editorHost = contentEl.createDiv("typst-source-mode");
+
+    const EditorClass = Platform.isMobile
+      ? PlainTypstEditor
+      : (await import("./typstEditor")).TypstEditor;
+    this.typstEditor = new EditorClass(
+      editorHost,
       this.plugin,
       (content: string) => {
         this.fileContent = content;
@@ -613,9 +627,11 @@ export class TypstView extends TextFileView {
       },
     );
 
-    this.typstEditor.initialize(this.fileContent).catch((err) => {
+    try {
+      await this.typstEditor.initialize(this.fileContent);
+    } catch (err) {
       console.error("Failed to initialize Typst editor:", err);
-    });
+    }
   }
 
   private handleContentChange(content: string): void {
@@ -648,7 +664,7 @@ export class TypstView extends TextFileView {
     this.stateManager.restoreEditorState(this.typstEditor);
   }
 
-  private async showReadingMode(pdfData: Uint8Array): Promise<void> {
+  public async showReadingMode(pdfData: Uint8Array): Promise<void> {
     const contentEl = this.getContentElement();
     if (!contentEl) return;
 

@@ -1,4 +1,5 @@
-import { TypstEditor } from "./typstEditor";
+import type { TypstEditor } from "./typstEditor";
+import type { PlainTypstEditor } from "./plainTypstEditor";
 
 export interface EditorState {
   lineNumber: number;
@@ -10,7 +11,7 @@ export class EditorStateManager {
   private savedEditorState: EditorState | null = null;
   private savedReadingScrollTop: number = 0;
 
-  saveEditorState(editor: TypstEditor | null): void {
+  saveEditorState(editor: TypstEditor | PlainTypstEditor | null): void {
     if (editor) {
       const state = editor.getEditorState();
       if (state) {
@@ -25,7 +26,7 @@ export class EditorStateManager {
     }
   }
 
-  restoreEditorState(editor: TypstEditor | null): void {
+  restoreEditorState(editor: TypstEditor | PlainTypstEditor | null): void {
     if (this.savedEditorState && editor) {
       requestAnimationFrame(() => {
         if (editor && this.savedEditorState) {

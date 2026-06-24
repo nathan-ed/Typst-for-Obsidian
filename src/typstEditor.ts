@@ -84,7 +84,7 @@ export class TypstEditor {
       value: this.content,
       language: "typst",
       theme: isDarkTheme ? "vs-dark" : "vs",
-      automaticLayout: false,
+      automaticLayout: true,
       scrollBeyondLastLine: false,
       wordWrap: "on",
       minimap: { enabled: false },

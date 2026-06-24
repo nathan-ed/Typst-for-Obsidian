@@ -320,7 +320,11 @@
 .typst-monaco-editor-container {
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .typst-monaco-editor-container .monaco-editor {
@@ -347,6 +351,11 @@
   border: none !important;
 }
 
+.typst-monaco-editor-container .monaco-editor .cursor {
+  background-color: var(--text-normal) !important;
+  border-color: var(--text-normal) !important;
+}
+
 .typst-monaco-editor-container .monaco-editor .margin .sticky-widget-lines,
 .sticky-line-number {
   background-color: var(--background-primary) !important;
@@ -357,7 +366,40 @@
   padding: 0 !important;
   height: 100%;
   width: 100%;
+  min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.typst-source-mode {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.typst-plain-editor-container {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.typst-plain-editor {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  box-sizing: border-box;
+  resize: none;
+  border: none;
+  outline: none;
+  padding: var(--size-4-4);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  line-height: var(--line-height-normal);
 }
 
 /* ========================================================================== */
